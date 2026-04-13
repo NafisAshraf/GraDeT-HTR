@@ -108,8 +108,11 @@ class GraphemeTokenizer:
         self.add_eos_token = add_eos_token
         
         self.pad_token_id = self.word2index[self.blank_token]
-        self.bos_token_id = self.word2index[self.blank_token]
-        self.eos_token_id = self.word2index[self.blank_token]
+        # Use .get() so that if bos/eos tokens are not yet in the initial vocab
+        # (they are added later via add_tokens), we fall back to blank safely.
+        # After add_tokens() is called, bos/eos_token_id are updated in place.
+        self.bos_token_id = self.word2index.get(self.bos_token, self.word2index[self.blank_token])
+        self.eos_token_id = self.word2index.get(self.eos_token, self.word2index[self.blank_token])
 
     def __call__(
         self,

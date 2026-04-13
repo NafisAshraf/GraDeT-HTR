@@ -1,25 +1,35 @@
 import sys
-sys.path.append('../')
+from pathlib import Path
+
+# Add the project root to sys.path so BnGraphemizer can be imported regardless
+# of which directory train.py (or any other entry point) is launched from.
+_project_root = str(Path(__file__).parent.parent)
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
 
 import torch
 
 from BnGraphemizer.trie_tokenizer import TrieTokenizer
 from BnGraphemizer.base import GraphemeTokenizer
 
+
 class BnGraphemizerProcessor:
     def __init__(
-        self, 
-        grapheme_file, 
-        model_max_length=32, 
-        normalize_unicode=True, 
-        normalization_mode='NFKC', 
+        self,
+        grapheme_file,
+        model_max_length=32,
+        normalize_unicode=True,
+        normalization_mode='NFKC',
         normalizer="buetNormalizer",
         blank_token: str = "_",
-        bos_token: str = "_",
-        eos_token: str = "_",
+        # Use the OOV token "▁" (id=0) for BOS and EOS so they are distinct
+        # from the PAD token "_" (id=1).  BOS==EOS is acceptable in seq2seq
+        # (GPT-2 itself uses a single special token for both).
+        bos_token: str = "▁",
+        eos_token: str = "▁",
         add_bos_token=False,
-        add_eos_token=False):
-        
+        add_eos_token=False,
+    ):
         self.grapheme_file = grapheme_file
         self.model_max_length = model_max_length
         self.normalize_unicode = normalize_unicode
@@ -33,23 +43,21 @@ class BnGraphemizerProcessor:
 
         self.list_of_graphemes = self._load_graphemes()
         self.bn_graphmemizer = self._initialize_graphemizer()
-        
+
         self.pad_token_id = self.bn_graphmemizer.pad_token_id
         self.bos_token_id = self.bn_graphmemizer.bos_token_id
         self.eos_token_id = self.bn_graphmemizer.eos_token_id
 
     def _load_graphemes(self):
-        """Load the graphemes from the file."""
+        """Load and deduplicate graphemes from the vocabulary file."""
         with open(self.grapheme_file, 'r', encoding='utf-8') as f:
-            graphemes = sorted(
-                list(set(
-                    [line.strip() for line in f.readlines() if line.strip()]
-                ))
-            )
+            graphemes = sorted(list(set(
+                line.strip() for line in f if line.strip()
+            )))
         return graphemes
 
     def _initialize_graphemizer(self):
-        """Initialize the graphemizer with the loaded graphemes."""
+        """Initialise the trie-based grapheme tokenizer."""
         graphemizer = GraphemeTokenizer(
             tokenizer_class=TrieTokenizer,
             max_len=self.model_max_length,
@@ -58,26 +66,22 @@ class BnGraphemizerProcessor:
             normalizer=self.normalizer,
             printer=print,
             blank_token=self.blank_token,
-            bos_token = self.bos_token,
-            eos_token = self.eos_token,
-            add_bos_token=self.add_eos_token,
-            add_eos_token=self.add_eos_token
+            bos_token=self.bos_token,
+            eos_token=self.eos_token,
+            add_bos_token=self.add_bos_token,   # FIX: was erroneously self.add_eos_token
+            add_eos_token=self.add_eos_token,
         )
         graphemizer.add_tokens(self.list_of_graphemes, reset_oov=True)
         return graphemizer
 
     def __call__(self, texts, padding=False):
-        """Tokenize a list of Bengali texts."""
+        """Tokenize a single string or a (nested) list of Bengali strings."""
         bng_text_inputs = self.bn_graphmemizer.tokenize(texts, padding=padding)
-        
-        # print(bng_text_inputs)
-        
         bng_inputs = self._get_tokenized_inputs(bng_text_inputs)
-        # print(bng_inputs)
 
         bng_input_ids = torch.Tensor(bng_inputs['input_ids']).long()
         bng_attention_mask = torch.Tensor(bng_inputs['attention_mask']).long()
-        
+
         if bng_input_ids.ndim == 1:
             bng_input_ids = bng_input_ids.unsqueeze(0)
         if bng_attention_mask.ndim == 1:
@@ -85,33 +89,28 @@ class BnGraphemizerProcessor:
 
         return {
             'input_ids': bng_input_ids,
-            'attention_mask': bng_attention_mask
+            'attention_mask': bng_attention_mask,
         }
-        
+
     def _get_tokenized_inputs(self, inputs):
-        """Split the tokenized inputs into input_ids and attention_mask"""
+        """Recursively extract input_ids and attention_mask from tokenizer output."""
         if not isinstance(inputs, list):
             return {
                 'input_ids': inputs['input_ids'],
-                'attention_mask': inputs['attention_mask']
-            } 
-            
-        input_ids = []
-        attention_mask = []
-        for input in inputs:
-            if isinstance(input, list):
-                input = self._get_tokenized_inputs(input)
-            input_ids.append(input['input_ids'])
-            attention_mask.append(input['attention_mask'])
-            
-        return {
-            'input_ids': input_ids,
-            'attention_mask': attention_mask
-        } 
+                'attention_mask': inputs['attention_mask'],
+            }
 
-        
+        input_ids, attention_mask = [], []
+        for item in inputs:
+            if isinstance(item, list):
+                item = self._get_tokenized_inputs(item)
+            input_ids.append(item['input_ids'])
+            attention_mask.append(item['attention_mask'])
+
+        return {'input_ids': input_ids, 'attention_mask': attention_mask}
+
     def decode(self, input_ids):
-        """Decode input IDs back to the original text."""
+        """Decode a 1-D or 2-D token ID tensor back to text."""
         if not isinstance(input_ids, torch.Tensor):
             raise ValueError("Input must be a PyTorch tensor.")
 
@@ -120,32 +119,35 @@ class BnGraphemizerProcessor:
 
         if input_ids.ndim == 1:
             token_list = self.bn_graphmemizer.ids_to_token(input_ids.tolist())
-            decoded_text = ''.join(token_list)
-
-            return decoded_text
+            return ''.join(token_list)
         elif input_ids.ndim >= 2:
-            return [
-                self.decode(input_ids[i]) for i in range(input_ids.shape[0])
-            ]
+            return [self.decode(input_ids[i]) for i in range(input_ids.shape[0])]
         else:
             raise ValueError("Unsupported input tensor dimensions.")
-    
+
 
 if __name__ == "__main__":
-    processor = BnGraphemizerProcessor(grapheme_file='bn_grapheme_1296_from_bengali.ai.buet.txt', add_bos_token=True, add_eos_token=True)
+    import os
+    vocab_file = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        'tokenization', 'bn_grapheme_1296_from_bengali.ai.buet.txt'
+    )
+    processor = BnGraphemizerProcessor(
+        grapheme_file=vocab_file,
+        add_bos_token=True,
+        add_eos_token=True,
+    )
 
-    bng_texts = [["শুভ অপরাহ্ন", "পরে দেখা হবে", "শুভ জন্মদিন", "অভিনন্দন"],
-                 ["শুভ অপরাহ্ন", "পরে দেখা হবে", "শুভ জন্মদিন", "অভিনন্দন"]]
-    
+    bng_texts = [
+        ["শুভ অপরাহ্ন", "পরে দেখা হবে", "শুভ জন্মদিন", "অভিনন্দন"],
+        ["শুভ অপরাহ্ন", "পরে দেখা হবে", "শুভ জন্মদিন", "অভিনন্দন"],
+    ]
+
     tokenized_outputs = processor(bng_texts, padding=True)
+    print("input_ids shape:", tokenized_outputs['input_ids'].shape)
+    print("pad_token_id:", processor.pad_token_id)
+    print("bos_token_id:", processor.bos_token_id)
+    print("eos_token_id:", processor.eos_token_id)
 
-    print(tokenized_outputs['input_ids'])
-    print(tokenized_outputs['input_ids'].shape)
-    print(tokenized_outputs['input_ids'].dtype)
-
-    print(tokenized_outputs['attention_mask'])
-    print(tokenized_outputs['attention_mask'].shape)
-    print(tokenized_outputs['attention_mask'].dtype)
-
-    decoded_outputs = processor.decode(tokenized_outputs['input_ids'])
-    print(decoded_outputs)
+    decoded = processor.decode(tokenized_outputs['input_ids'])
+    print("decoded:", decoded)

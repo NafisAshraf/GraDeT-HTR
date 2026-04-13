@@ -47,7 +47,9 @@ class DTrOCRModel(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         use_cache: Optional[bool] = False,
     ) -> DTrOCRModelOutput:
-        device = input_ids.device if input_ids is not None else input_ids.device
+        # FIX: both branches were identical before — if input_ids is None we
+        # fall back to pixel_values (always present on the first forward pass).
+        device = pixel_values.device if input_ids is None else input_ids.device
         input_ids = input_ids.view(-1, input_ids.shape[-1])
 
         # past key values
